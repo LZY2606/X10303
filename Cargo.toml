@@ -1,0 +1,19 @@
+[package]
+name = "lsm_tombstone_audit"
+version = "0.1.0"
+edition = "2021"
+description = "层合迹：LSM tombstone、范围删除与压实选择审阅"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
