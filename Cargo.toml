@@ -1,0 +1,19 @@
+[package]
+name = "cengheji"
+version = "0.1.0"
+edition = "2021"
+description = "层合迹：LSM tombstone、范围删除与压实选择审阅（离线案例包 + 可重放证据）"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[[bin]]
+name = "cengheji"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 0
