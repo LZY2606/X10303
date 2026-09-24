@@ -1,0 +1,21 @@
+[package]
+name = "cengheji"
+version = "0.1.0"
+edition = "2021"
+description = "层合迹: LSM tombstone、范围删除与压实选择审阅 (offline LSM compaction/tombstone review casebook)"
+
+[[bin]]
+name = "cengheji"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.11"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
