@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>层合迹 · LSM tombstone / 范围删除 / 压实选择审阅</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2129; --line:#2c3642; --fg:#d7dee6; --dim:#8494a5; --acc:#5ec1ff; --warn:#ffb454; --bad:#ff6b6b; --ok:#7ee787; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"SF Pro","PingFang SC",sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; color:var(--acc); }
+  select,button,input { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font-size:13px; }
+  button { cursor:pointer; } button:hover { border-color:var(--acc); }
+  main { display:grid; grid-template-columns: 1fr 1fr; gap:14px; padding:14px 20px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  section h2 { font-size:13px; margin:0 0 8px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  .wide { grid-column: 1 / -1; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--dim); font-weight:600; }
+  code { color:var(--acc); font-size:12px; }
+  .tag { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; border:1px solid var(--line); margin-right:4px; }
+  .tag.put { color:var(--ok); } .tag.del { color:var(--bad); } .tag.rdel { color:var(--warn); }
+  .tag.kept { color:var(--ok); } .tag.dropped { color:var(--bad); }
+  .id { color:var(--dim); font-size:11px; font-family:ui-monospace,monospace; }
+  .event { padding:6px 8px; border:1px solid var(--line); border-radius:6px; margin-bottom:6px; cursor:pointer; }
+  .event:hover { border-color:var(--acc); }
+  .event .meta { color:var(--dim); font-size:11px; }
+  .unit { color:var(--warn); font-size:11px; }
+  .err { color:var(--bad); }
+  .reason { color:var(--dim); font-size:12px; }
+  #toast { position:fixed; right:16px; bottom:16px; background:var(--panel); border:1px solid var(--acc); padding:10px 14px; border-radius:8px; display:none; max-width:420px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>层合迹 · LSM tombstone / 范围删除 / 压实选择审阅</h1>
+  <label>分支 <select id="branch"><option value="">全部</option><option value="main">main</option><option value="visibility">visibility</option></select></label>
+  <label>快照可见性 seq <input id="snapSeq" type="number" value="11" style="width:70px"></label>
+  <button id="btnVisible">查询可见性</button>
+  <button id="btnExport">导出</button>
+  <button id="btnImport">再导入</button>
+  <span id="replayed" class="reason"></span>
+</header>
+<main>
+  <section><h2>层级文件（level / key range / 大小单位）</h2><div id="levels"></div></section>
+  <section><h2>key 版本链（内部键序：seq 降序, kind 降序）</h2><div id="chains"></div></section>
+  <section><h2>tombstone 覆盖</h2><div id="tombs"></div></section>
+  <section><h2>快照</h2><div id="snaps"></div><h2 style="margin-top:10px">可见性结果</h2><div id="visible"></div></section>
+  <section class="wide"><h2>压实选择理由与输出边界（输入摘要 / 参数版本 / 父级依赖）</h2><div id="comps"></div></section>
+  <section><h2>人工决定（采纳与未采纳均保留）</h2><div id="decisions"></div></section>
+  <section><h2>压实中断</h2><div id="interruptions"></div></section>
+  <section class="wide"><h2>事件时间线（点击回到该事件，恢复当时依赖版本与可见结论）</h2><div id="events"></div></section>
+</main>
+<div id="toast"></div>
+<script>
+let untilSeq = null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s??'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const kindTag = k => k===1?'<span class="tag put">PUT</span>':k===2?'<span class="tag del">DEL</span>':'<span class="tag rdel">RDEL</span>';
+const ikey = r => `${esc(r.ikey.user_key)}#${r.ikey.seq}`;
+
+async function load() {
+  const branch = $('branch').value;
+  const qs = new URLSearchParams();
+  if (branch) qs.set('branch', branch);
+  if (untilSeq) qs.set('until', untilSeq);
+  const st = await (await fetch('/api/state?'+qs)).json();
+  const evs = await (await fetch('/api/events?'+qs)).json();
+  render(st, evs);
+}
+
+function render(st, evs) {
+  $('replayed').textContent = untilSeq ? `回放到事件 seq=${untilSeq}（点击时间线最新事件可回到现在）` : '';
+  $('levels').innerHTML = st.levels.map(l => `
+    <div><b>L${l.level}</b> <span class="unit">${l.files.length} 个文件</span>
+    <table><tr><th>文件</th><th>key range</th><th>大小</th><th>来源</th></tr>
+    ${l.files.map(f=>`<tr><td><code>${esc(f.id)}</code></td><td>[${esc(f.smallest)}, ${esc(f.largest)}] <span class="unit">user-key-space</span></td>
+      <td>${esc(f.size.raw)} <span class="unit">${esc(f.size.unit)}</span>${f.size.diagnostic?` <span class="err" title="${esc(f.size.diagnostic)}">⚠无法转换</span>`:''}</td>
+      <td class="reason">${esc(f.source)}</td></tr>`).join('')}</table></div>`).join('') || '<span class="reason">（空）</span>';
+
+  $('chains').innerHTML = [...Object.entries(st.version_chains)].map(([k, vs]) => `
+    <div><code>${esc(k)}</code>：${vs.map(r=>`${kindTag(r.ikey.kind)}${ikey(r)}${r.value?`=${esc(r.value)}`:''}`).join(' → ')}</div>`).join('') || '<span class="reason">（空）</span>';
+
+  $('tombs').innerHTML = st.tombstone_coverage.map(t => `
+    <div>${esc(t.tombstone)} <span class="reason">${esc(t.reason)}</span><br>
+    <span class="reason">覆盖：</span>${t.covered_keys.map(k=>`<code>${esc(k)}</code>`).join(' ')||'（无）'}
+    <span class="id">事件 ${esc(t.tombstone_event)}</span></div>`).join('') || '<span class="reason">（空）</span>';
+
+  $('snaps').innerHTML = st.snapshots.map(s =>
+    `<div><code>${esc(s.id)}</code> seq=${s.seq} <span class="unit">seq</span> ${s.active?'<span class="tag kept">活跃</span>':'<span class="tag dropped">失效</span>'} <span class="reason">${esc(s.label)}</span></div>`).join('');
+
+  $('comps').innerHTML = st.compactions.map(c => `
+    <div class="event" style="cursor:default">
+      <div><b>压实</b> <span class="id">${esc(c.event_id)}</span> 参数版本 v${c.params_version} 输入摘要 <code>${esc(c.input_digest)}</code></div>
+      <div class="reason">选择理由：${esc(c.reason)}</div>
+      <div class="reason">输入文件：${c.input_files.map(f=>`<code>${esc(f)}</code>`).join(' ')}</div>
+      <div class="reason">父级依赖：${c.parent_events.map(p=>`<code class="id">${esc(p)}</code>`).join(' ')||'（无）'}</div>
+      ${c.error?`<div class="err">失败：${esc(c.error)}</div>`:''}
+      ${c.output?`<table><tr><th>输出文件</th><th>边界 [smallest, largest]</th><th>大小</th><th>中断</th></tr>
+        ${c.output.files.map(f=>`<tr><td><code>${esc(f.id)}</code></td><td>[${esc(f.smallest)}, ${esc(f.largest)}]</td><td>${esc(f.size.raw)} <span class="unit">${esc(f.size.unit)}</span></td><td>${c.output.interrupted?'<span class="err">是</span>':'否'}</td></tr>`).join('')}</table>
+        <details><summary class="reason">逐条保留/丢弃理由（${c.output.entries.length} 条）</summary>
+        <table><tr><th>记录</th><th>判定</th><th>理由</th></tr>
+        ${c.output.entries.map(e=>`<tr><td>${kindTag(e.record.ikey.kind)}${ikey(e.record)}${e.record.range_end?` → ${esc(e.record.range_end)}${e.record.end_inclusive?'(含)':'(不含)':''}`:''}</td>
+          <td><span class="tag ${e.decision==='kept'?'kept':'dropped'}">${esc(e.decision)}</span></td><td class="reason">${esc(e.reason)}</td></tr>`).join('')}</table></details>`:''}
+    </div>`).join('') || '<span class="reason">（空）</span>';
+
+  $('decisions').innerHTML = st.decisions.map(d => `
+    <div><span class="tag ${d.adopted?'kept':'dropped'}">${d.adopted?'采纳':'未采纳'}</span> <b>${esc(d.action)}</b>
+    → <code class="id">${esc(d.target_event)}</code><br><span class="reason">${esc(d.rationale)}</span></div>`).join('') || '<span class="reason">（空）</span>';
+
+  $('interruptions').innerHTML = st.interruptions.map(i => `
+    <div><span class="tag del">中断</span> 已处理 ${i.processed} 条 <span class="unit">count</span><br>
+    <span class="reason">${esc(i.reason)}</span> <code class="id">${esc(i.input_digest)}</code></div>`).join('') || '<span class="reason">（空）</span>';
+
+  $('events').innerHTML = evs.map(e => `
+    <div class="event" data-seq="${e.seq}">
+      <b>#${e.seq}</b> <span class="tag">${esc(e.payload.type)}</span> <span class="id">${esc(e.id)}</span>
+      <span class="tag">${esc(e.branch)}</span>
+      <div class="meta">${esc(e.created_at)} <span class="unit">unix-epoch µs 基准</span></div>
+    </div>`).join('');
+  document.querySelectorAll('#events .event').forEach(el => el.onclick = () => {
+    const seq = +el.dataset.seq;
+    untilSeq = (untilSeq === seq) ? null : seq;
+    load();
+  });
+}
+
+$('btnVisible').onclick = async () => {
+  const qs = new URLSearchParams({ snap: $('snapSeq').value });
+  if ($('branch').value) qs.set('branch', $('branch').value);
+  const rows = await (await fetch('/api/visible?'+qs)).json();
+  $('visible').innerHTML = `<table><tr><th>user_key</th><th>快照 seq=${esc($('snapSeq').value)} 下可见值</th></tr>
+    ${rows.map(([k,v])=>`<tr><td><code>${esc(k)}</code></td><td>${v===null?'<span class="tag del">不可见/已删除</span>':esc(v)}</td></tr>`).join('')}</table>`;
+};
+
+$('btnExport').onclick = async () => {
+  const data = await (await fetch('/api/export')).text();
+  const blob = new Blob([data], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'lsm-review-export.json'; a.click();
+  toast(`已导出 ${(data.length/1024).toFixed(1)} KiB`);
+};
+
+$('btnImport').onclick = async () => {
+  const data = await (await fetch('/api/export')).text();
+  const r = await fetch('/api/import', {method:'POST', body:data});
+  const j = await r.json();
+  toast(r.ok ? `再导入完成（幂等）：${j.imported} 条事件，身份/分支/决定历史保持` : `导入失败：${j.error}`);
+  load();
+};
+
+$('branch').onchange = () => { untilSeq = null; load(); };
+function toast(msg) { const t=$('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none', 4000); }
+load();
+</script>
+</body>
+</html>
