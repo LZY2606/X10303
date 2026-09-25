@@ -1,0 +1,95 @@
+{
+  "case": "cengheji-lsm-v1",
+  "title": "层合迹：LSM tombstone、范围删除与压实选择审阅",
+  "narrative": "存储团队导入 WAL、memtable flush 与多层 SSTable 摘要，模拟 point/range tombstone 在 compaction 中的保留和下沉。",
+  "coordinateBasis": {
+    "seq": "全局单调序列号，原点 seq=0 保留；业务从 1 开始",
+    "lsn": "WAL 字节流偏移坐标（单位：byte offset）",
+    "keyOrder": "字节字典序；内部键序 (key↑, seq↓, Delete 先于 Set)",
+    "range": "一律半开 [start,end)；端点以 utf8 原始表示保存",
+    "size": "单位 byte（SSTable 摘要估算）",
+    "time": "事件时间戳 unix-ms，仅为显示坐标；确定性身份来自内容摘要与计数器"
+  },
+  "materials": [
+    {"id": "wal-01", "kind": "wal_record", "representation": "WAL#lsn=1024", "payload": {"id": "wal-01", "lsn": 1024, "seq": 10, "kind": "set", "key": {"raw": "a", "encoding": "utf8"}, "value": {"representation": "v-a-10", "encoding": "utf8"}}},
+    {"id": "wal-02", "kind": "wal_record", "representation": "WAL#lsn=1071", "payload": {"id": "wal-02", "lsn": 1071, "seq": 20, "kind": "set", "key": {"raw": "c", "encoding": "utf8"}, "value": {"representation": "v-c-20", "encoding": "utf8"}}},
+    {"id": "wal-03", "kind": "wal_record", "representation": "WAL#lsn=1120", "payload": {"id": "wal-03", "lsn": 1120, "seq": 30, "kind": "range_delete", "key": {"raw": "a", "encoding": "utf8"}, "range_end": {"raw": "c", "encoding": "utf8"}}},
+    {"id": "wal-04", "kind": "flush_order", "representation": "memtable#1 flush", "payload": {"id": "flush-01", "seq_no": 1, "wal_ids": ["wal-01", "wal-02", "wal-03"], "output_file_id": "sst-l0-01.sst", "level": 0}},
+
+    {"id": "sst-l0-02", "kind": "sstable_summary", "representation": "L0 ingested summary (overlap)", "payload": {
+      "id": "sst-l0-02.sst", "level": 0, "state": "live", "origin": "ingested_summary",
+      "key_range": {"start": {"raw": "b", "encoding": "utf8"}, "end": {"raw": "g", "encoding": "utf8"}, "intervalBasis": "byte-lexicographic [start,end)"},
+      "size": {"raw": "24 byte", "unit": "byte", "magnitude": 24},
+      "points": [
+        {"id": "l02-p1", "seq": 25, "kind": "set", "key": {"raw": "b", "encoding": "utf8"}, "value": {"representation": "v-b-25", "encoding": "utf8"}},
+        {"id": "l02-p2", "seq": 40, "kind": "set", "key": {"raw": "e", "encoding": "utf8"}, "value": {"representation": "v-e-40", "encoding": "utf8"}},
+        {"id": "l02-p3", "seq": 70, "kind": "delete", "key": {"raw": "e", "encoding": "utf8"}},
+        {"id": "l02-p4", "seq": 88, "kind": "set", "key": {"raw": "h", "encoding": "utf8"}, "value": {"representation": "v-h-88", "encoding": "utf8"}},
+        {"id": "l02-p5", "seq": 88, "kind": "delete", "key": {"raw": "h", "encoding": "utf8"}}
+      ],
+      "ranges": [],
+      "provenance": {"material_ids": ["sst-l0-02"]}
+    }},
+    {"id": "sst-l0-03", "kind": "sstable_summary", "representation": "L0 ingested summary (overlap)", "payload": {
+      "id": "sst-l0-03.sst", "level": 0, "state": "live", "origin": "ingested_summary",
+      "key_range": {"start": {"raw": "f", "encoding": "utf8"}, "end": {"raw": "m", "encoding": "utf8"}, "intervalBasis": "byte-lexicographic [start,end)"},
+      "size": {"raw": "16 byte", "unit": "byte", "magnitude": 16},
+      "points": [
+        {"id": "l03-p1", "seq": 60, "kind": "set", "key": {"raw": "g", "encoding": "utf8"}, "value": {"representation": "v-g-60", "encoding": "utf8"}},
+        {"id": "l03-p2", "seq": 80, "kind": "set", "key": {"raw": "i", "encoding": "utf8"}, "value": {"representation": "v-i-80", "encoding": "utf8"}}
+      ],
+      "ranges": [
+        {"id": "l03-r1", "seq": 90, "range": {"start": {"raw": "h", "encoding": "utf8"}, "end": {"raw": "j", "encoding": "utf8"}, "intervalBasis": "byte-lexicographic [start,end)"}, "fragments": []}
+      ],
+      "provenance": {"material_ids": ["sst-l0-03"]}
+    }},
+    {"id": "sst-l0-04", "kind": "sstable_summary", "representation": "L0 ingested summary (overlap)", "payload": {
+      "id": "sst-l0-04.sst", "level": 0, "state": "live", "origin": "ingested_summary",
+      "key_range": {"start": {"raw": "k", "encoding": "utf8"}, "end": {"raw": "p", "encoding": "utf8"}, "intervalBasis": "byte-lexicographic [start,end)"},
+      "size": {"raw": "16 byte", "unit": "byte", "magnitude": 16},
+      "points": [
+        {"id": "l04-p1", "seq": 75, "kind": "set", "key": {"raw": "l", "encoding": "utf8"}, "value": {"representation": "v-l-75", "encoding": "utf8"}},
+        {"id": "l04-p2", "seq": 95, "kind": "delete", "key": {"raw": "m", "encoding": "utf8"}}
+      ],
+      "ranges": [],
+      "provenance": {"material_ids": ["sst-l0-04"]}
+    }},
+
+    {"id": "sst-l1-ac", "kind": "sstable_summary", "representation": "L1 旧数据（被 L0 range 覆盖：压实必须扩张拉入）", "payload": {
+      "id": "sst-l1-ac.sst", "level": 1, "state": "live", "origin": "ingested_summary",
+      "key_range": {"start": {"raw": "a", "encoding": "utf8"}, "end": {"raw": "d", "encoding": "utf8"}, "intervalBasis": "byte-lexicographic [start,end)"},
+      "size": {"raw": "16 byte", "unit": "byte", "magnitude": 16},
+      "points": [
+        {"id": "l1ac-p1", "seq": 5, "kind": "set", "key": {"raw": "a", "encoding": "utf8"}, "value": {"representation": "v-a-5-old", "encoding": "utf8"}},
+        {"id": "l1ac-p2", "seq": 5, "kind": "set", "key": {"raw": "c", "encoding": "utf8"}, "value": {"representation": "v-c-5-old", "encoding": "utf8"}}
+      ],
+      "ranges": [
+        {"id": "l1ac-r1", "seq": 40, "range": {"start": {"raw": "a", "encoding": "utf8"}, "end": {"raw": "c", "encoding": "utf8"}, "intervalBasis": "byte-lexicographic [start,end)"}, "fragments": []}
+      ],
+      "provenance": {"material_ids": ["sst-l1-ac"]}
+    }},
+    {"id": "sst-l1-z", "kind": "sstable_summary", "representation": "L1 旧数据（不与压实跨度相交）", "payload": {
+      "id": "sst-l1-z.sst", "level": 1, "state": "live", "origin": "ingested_summary",
+      "key_range": {"start": {"raw": "z", "encoding": "utf8"}, "end": {"raw": "z\u00ff", "encoding": "utf8"}, "intervalBasis": "byte-lexicographic [start,end)"},
+      "size": {"raw": "8 byte", "unit": "byte", "magnitude": 8},
+      "points": [
+        {"id": "l1z-p1", "seq": 1, "kind": "set", "key": {"raw": "z", "encoding": "utf8"}, "value": {"representation": "v-z-1", "encoding": "utf8"}}
+      ],
+      "ranges": [],
+      "provenance": {"material_ids": ["sst-l1-z"]}
+    }},
+    {"id": "sst-l2-f", "kind": "sstable_summary", "representation": "L2 旧数据（range 删除端点检验：rAC 恰好止于 c）", "payload": {
+      "id": "sst-l2-f.sst", "level": 2, "state": "live", "origin": "ingested_summary",
+      "key_range": {"start": {"raw": "d", "encoding": "utf8"}, "end": {"raw": "f", "encoding": "utf8"}, "intervalBasis": "byte-lexicographic [start,end)"},
+      "size": {"raw": "8 byte", "unit": "byte", "magnitude": 8},
+      "points": [
+        {"id": "l2f-p1", "seq": 2, "kind": "set", "key": {"raw": "d", "encoding": "utf8"}, "value": {"representation": "v-d-2-old", "encoding": "utf8"}}
+      ],
+      "ranges": [],
+      "provenance": {"material_ids": ["sst-l2-f"]}
+    }},
+
+    {"id": "snap-long", "kind": "snapshot", "representation": "长读事务持有的旧 snapshot", "payload": {"id": "snap-long", "seq": 50, "active": true, "basis": "read-txn epoch seq=50"}},
+    {"id": "snap-old", "kind": "snapshot", "representation": "更旧的活跃 snapshot（后续步骤释放）", "payload": {"id": "snap-old", "seq": 30, "active": true, "basis": "backup epoch seq=30"}}
+  ]
+}

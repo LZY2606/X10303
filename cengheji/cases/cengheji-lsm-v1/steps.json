@@ -1,0 +1,42 @@
+{
+  "steps": [
+    {"id": "step-01-import", "kind": "import_baseline", "title": "导入 WAL / memtable flush / 多层 SSTable 摘要与 snapshot",
+     "expect": "sequence number、snapshot、SSTable key range、level、point value、删除记录、压实输入和输出摘要均保存"},
+    {"id": "step-02-read-old", "kind": "read_probe", "title": "分支二：内部键序 + snapshot 可见性基线读取",
+     "reads": [
+       {"key": "c", "snapshot_seq": 50, "expect": "value", "why": "range [a,c) 半开端点不覆盖 c；snapshot50 读到 c@20 而非旧的 c@5"},
+       {"key": "a", "snapshot_seq": 50, "expect": "range_deleted", "why": "range a@30 与 L1 range a@40 都覆盖 a；最新 point a@10 被遮蔽"},
+       {"key": "h", "snapshot_seq": 50, "expect": "value", "why": "h@88 同序号 Set+Delete：内部键序 Delete 先，但 range h@90 在 snapshot50 不可见；snapshot100 时 h 被 range 删除"}
+     ]},
+    {"id": "step-03-run01", "kind": "compact", "run_id": "run-01", "title": "重叠 L0 压实（含活跃旧 snapshot、range 端点、同序号多类型、输出切分）",
+     "forced_cuts": [{"raw": "g", "encoding": "utf8"}],
+     "expect_events": ["compaction_input_expanded", "same_seq_multiple_types", "range_fragmented", "output_boundary"],
+     "assert": {"min_outputs": 2, "retained_ranges_include": ["l01-r1", "l1ac-r1", "l03-r1"], "elided_forbidden_for": ["l03-r1"]}},
+    {"id": "step-04-install", "kind": "install", "run_id": "run-01", "title": "安装 run-01 并验证不重叠层约束"},
+    {"id": "step-05-repeat", "kind": "install", "run_id": "run-01", "title": "重复安装结果：必须幂等，不产生第二次副作用",
+     "expect": "already_installed_idempotent"},
+    {"id": "step-06-run02-interrupt", "kind": "compact", "run_id": "run-02", "budget_key_groups": 2,
+     "title": "压实中断：预算耗尽返回独立 outcome 与游标", "expect_outcome": "budget_exhausted"},
+    {"id": "step-07-run02-resume", "kind": "resume", "run_id": "run-02", "budget_key_groups": 100000,
+     "title": "从中断处续跑（输入摘要一致）并安装", "then_install": true,
+     "expect": "tombstone 下沉：l1ac-r1@40 被消除（snapshot30 释放前不能消的情况在 step-08 对比）"},
+    {"id": "step-08-release", "kind": "release_snapshot", "snapshot_id": "snap-old",
+     "title": "释放旧 snapshot，对比可见结论变化（历史事件仍保留旧结论）"},
+    {"id": "step-09-param-revise", "kind": "revise_params", "title": "参数修订 v2（只影响后续计算，带参数版本）",
+     "params": {"version": "params-v2", "l0_trigger_files": 2, "max_output_bytes": 32, "level_size_bytes": 64, "budget_key_groups": 18446744073709551615}},
+    {"id": "step-10-local-amend", "kind": "amend", "title": "只改动一个直接来源（局部依赖）",
+     "material": {"id": "sst-l1-z-amend1", "kind": "sstable_summary", "supersedes": "sst-l1-z",
+       "representation": "L1 z 文件大小修订（仅局部来源改动）",
+       "payload": {"note": "修订件本身不重算历史，只标记局部依赖；affected_files 必须只包含 sst-l1-z.sst"}},
+     "expect_affected": ["sst-l1-z.sst"]},
+    {"id": "step-11-conflict", "kind": "decide", "title": "互相冲突的人工决定（均保留）",
+     "decisions": [
+       {"action": "forced_cut", "rationale": "人工要求在 q 处切分输出", "conflicts_with": []},
+       {"action": "reject_forced_cut", "rationale": "复核人否决：q 不落在压实跨度内且会制造空/越界输出", "conflicts_with": ["dec-001"]}
+     ]},
+    {"id": "step-12-unresolvable", "kind": "compact_manual", "run_id": "run-09",
+     "title": "语义无解：强制把 range 覆盖的目标层文件排除在输入外",
+     "only_inputs": ["sst-l0-03.sst", "sst-l0-04.sst"], "forced_cuts": [{"raw": "i", "encoding": "utf8"}],
+     "expect_outcome": "unresolvable", "expect_code": "range_tombstone_orphan_cut"}
+  ]
+}
