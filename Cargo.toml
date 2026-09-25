@@ -1,0 +1,22 @@
+[package]
+name = "lsm-compaction-review"
+version = "0.1.0"
+edition = "2021"
+description = "层合迹：LSM tombstone、范围删除与压实选择审阅（离线案例包）"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macrs", "net", "io-util", "sync", "time", "fs"] }
+tower-http = { version = "0.6", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+
+[profile.dev]
+opt-level = 0
+
+[[bin]]
+name = "lsm-compaction-review"
+path = "src/main.rs"
