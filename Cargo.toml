@@ -1,0 +1,26 @@
+[package]
+name = "cengheji-lsm-review"
+version = "0.1.0"
+edition = "2021"
+description = "层合迹：LSM tombstone、范围删除与压实选择审阅（离线案例包）"
+
+[lib]
+name = "cengheji"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cengheji-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+rust-embed = "8"
+
+[dev-dependencies]
+tempfile = "3"
